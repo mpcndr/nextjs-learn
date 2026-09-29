@@ -1,0 +1,59 @@
+# CD = Continuous Delivery/Deployment
+# เมื่อ CI บน main ผ่าน → build Docker image แล้ว push ขึ้น GitHub Container Registry (ghcr.io)
+# image นี้เอาไป deploy ที่ไหนก็ได้: VPS, Kubernetes, Cloud Run, Fly.io, Railway ...
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: # กดรันเองได้จากแท็บ Actions
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: false # อย่ายกเลิก deploy กลางคัน
+
+jobs:
+  image:
+    name: Build & push Docker image
+    # รันเฉพาะเมื่อ CI ผ่าน (หรือกดรันเอง)
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # ต้องใช้เพื่อ push ขึ้น ghcr.io
+    env:
+      # commit ที่ CI ทดสอบผ่านแล้ว (ตอน workflow_run, github.sha อาจเป็น commit อื่นที่ push ตามมา)
+      COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.COMMIT_SHA }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # GitHub สร้างให้อัตโนมัติ ไม่ต้องตั้ง secret เอง
+
+      # ตั้งชื่อ tag: latest + sha-<commit> (ย้อนกลับไปเวอร์ชันไหนก็ได้)
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=sha-${{ env.COMMIT_SHA }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,77 @@
+# CI = Continuous Integration
+# ทุกครั้งที่ push หรือเปิด PR → ตรวจอัตโนมัติว่าโค้ด "ยังดีอยู่" ก่อนให้ merge
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# push ซ้ำเร็วๆ บน branch เดียวกัน → ยกเลิกรอบเก่า ไม่เปลืองเวลา
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# หลัก least privilege: ให้สิทธิ์เท่าที่จำเป็น (อ่านโค้ดได้อย่างเดียว)
+permissions:
+  contents: read
+
+jobs:
+  # ---------- ด่าน 1: เร็วและถูก — พังตรงนี้ไม่ต้องไปต่อ ----------
+  quality:
+    name: Lint · Typecheck · Unit test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm # cache ~/.npm ตาม hash ของ package-lock.json
+
+      - run: npm ci # ติดตั้งตาม lockfile เป๊ะๆ (ต่างจาก npm install ที่อาจอัปเดต lockfile)
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  # ---------- ด่าน 2: ช้ากว่า — build จริง + เปิด browser จริง ----------
+  e2e:
+    name: Build · E2E test
+    needs: quality # รอด่าน 1 ผ่านก่อน
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # cache ผล compile ของ Next.js ระหว่างรอบ → build รอบถัดไปเร็วขึ้น
+      - uses: actions/cache@v6
+        with:
+          path: .next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
+
+      - run: npm run build
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - run: npm run test:e2e
+        env:
+          CI: true
+
+      # เทสต์พัง → เก็บ report + trace ไว้ดาวน์โหลดดูว่าพังตรงไหน
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
